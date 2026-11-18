@@ -26,6 +26,13 @@ export interface Task {
   updated_at?: string;
 }
 
+export interface TaskStats {
+  total: number;
+  todo: number;
+  inProgress: number;
+  completed: number;
+}
+
 export interface AuthPayload {
   userId: string;
   email: string;

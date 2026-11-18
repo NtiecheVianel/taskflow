@@ -1,144 +1,80 @@
-import { config } from '../config';
-import { Task, User, UserWithPassword } from '../types';
+import { config, isCloudHost } from '../config';
+import { checkDatabase } from '../config/database';
+import { DataUnavailableError } from '../errors';
+import { Task, TaskStats, User, UserWithPassword } from '../types';
+import { gatewayClient } from './gatewayClient';
+import { postgresStore } from './postgresStore';
 
-export class DataUnavailableError extends Error {
-  statusCode: number;
-  constructor(message = 'Communication interrompue avec la base de données. Vérifiez que la passerelle ou le tunnel sont actifs.') {
-    super(message);
-    this.name = 'DataUnavailableError';
-    this.statusCode = 503;
+let cloudOverrideWarned = false;
+
+/**
+ * Render (et tout hôte cloud) parle uniquement à la passerelle.
+ * En local, LOCAL_GATEWAY_URL active le même chemin.
+ * DATA_SOURCE=postgres force PostgreSQL pour les tests et le développement local.
+ */
+export function usesGateway(): boolean {
+  const forcePostgres = process.env.DATA_SOURCE === 'postgres';
+  if (isCloudHost() || config.nodeEnv === 'production') {
+    if (forcePostgres && !cloudOverrideWarned) {
+      console.error('DATA_SOURCE=postgres ignoré : le backend cloud ne se connecte pas à PostgreSQL.');
+      cloudOverrideWarned = true;
+    }
+    return true;
   }
+  if (process.env.DATA_SOURCE === 'gateway') return true;
+  if (forcePostgres) return false;
+  return Boolean(config.localGatewayUrl);
 }
 
-// Stockage autonome en mémoire
-const memoryUsers: UserWithPassword[] = [];
-const memoryTasks: Task[] = [];
-
-// Appel sécurisé vers la Passerelle (si configurée par votre coéquipier)
-async function callGateway<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  if (!config.gatewayUrl) {
-    throw new DataUnavailableError('GATEWAY_URL non configuré.');
-  }
-
-  const url = `${config.gatewayUrl}${endpoint}`;
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        'x-gateway-secret': config.gatewaySecret,
-        ...(options.headers || {}),
-      },
-    });
-
-    clearTimeout(timeout);
-
-    if (!response.ok) {
-      let errorMsg = `Erreur passerelle: HTTP ${response.status}`;
-      try {
-        const errJson = await response.json();
-        errorMsg = errJson.message || errorMsg;
-      } catch {
-        // Ignorer
-      }
-      throw new Error(errorMsg);
-    }
-
-    return (await response.json()) as T;
-  } catch (error: any) {
-    console.error(`[Passerelle Erreur] ${endpoint}:`, error.message);
+function assertGatewayReady(): void {
+  if (!config.localGatewayUrl || !config.localGatewayToken) {
     throw new DataUnavailableError(
-      'Impossible de joindre la passerelle de données. Le serveur de données est indisponible.'
+      'Passerelle locale non configurée. Renseignez LOCAL_GATEWAY_URL et LOCAL_GATEWAY_TOKEN.'
     );
   }
 }
 
 export const dataService = {
-  // Récupérer un utilisateur par email
   async getUserByEmail(email: string): Promise<UserWithPassword | null> {
-    if (config.gatewayUrl) {
-      return callGateway<UserWithPassword | null>('/api/internal/users/by-email', {
-        method: 'POST',
-        body: JSON.stringify({ email }),
-      });
+    if (usesGateway()) {
+      assertGatewayReady();
+      return gatewayClient.getUserByEmail(email);
     }
-
-    // Mode autonome
-    const found = memoryUsers.find((u) => u.email.toLowerCase() === email.toLowerCase());
-    return found || null;
+    return postgresStore.getUserByEmail(email);
   },
 
-  // Récupérer un utilisateur par ID
   async getUserById(id: string): Promise<User | null> {
-    if (config.gatewayUrl) {
-      return callGateway<User | null>(`/api/internal/users/${id}`);
+    if (usesGateway()) {
+      assertGatewayReady();
+      return gatewayClient.getUserById(id);
     }
-
-    // Mode autonome
-    const found = memoryUsers.find((u) => u.id === id);
-    if (!found) return null;
-    return {
-      id: found.id,
-      full_name: found.full_name,
-      email: found.email,
-      created_at: found.created_at,
-    };
+    return postgresStore.getUserById(id);
   },
 
-  // Créer un utilisateur
   async createUser(data: { full_name: string; email: string; password_hash: string }): Promise<User> {
-    if (config.gatewayUrl) {
-      return callGateway<User>('/api/internal/users', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      });
+    if (usesGateway()) {
+      assertGatewayReady();
+      return gatewayClient.createUser(data);
     }
-
-    // Mode autonome
-    const newUser: UserWithPassword = {
-      id: 'user-' + Date.now(),
-      full_name: data.full_name,
-      email: data.email.toLowerCase(),
-      password_hash: data.password_hash,
-      created_at: new Date().toISOString(),
-    };
-    memoryUsers.push(newUser);
-    return {
-      id: newUser.id,
-      full_name: newUser.full_name,
-      email: newUser.email,
-      created_at: newUser.created_at,
-    };
+    return postgresStore.createUser(data);
   },
 
-  // Lister toutes les tâches d'un utilisateur
   async getTasks(userId: string): Promise<Task[]> {
-    if (config.gatewayUrl) {
-      return callGateway<Task[]>(`/api/internal/tasks?userId=${userId}`);
+    if (usesGateway()) {
+      assertGatewayReady();
+      return gatewayClient.getTasks(userId);
     }
-
-    // Mode autonome
-    return memoryTasks
-      .filter((t) => t.user_id === userId)
-      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    return postgresStore.getTasks(userId);
   },
 
-  // Récupérer une tâche précise
   async getTaskById(id: string, userId: string): Promise<Task | null> {
-    if (config.gatewayUrl) {
-      return callGateway<Task | null>(`/api/internal/tasks/${id}?userId=${userId}`);
+    if (usesGateway()) {
+      assertGatewayReady();
+      return gatewayClient.getTaskById(id, userId);
     }
-
-    // Mode autonome
-    const found = memoryTasks.find((t) => t.id === id && t.user_id === userId);
-    return found || null;
+    return postgresStore.getTaskById(id, userId);
   },
 
-  // Créer une tâche
   async createTask(data: {
     user_id: string;
     title: string;
@@ -147,30 +83,13 @@ export const dataService = {
     priority: string;
     due_date?: string | null;
   }): Promise<Task> {
-    if (config.gatewayUrl) {
-      return callGateway<Task>('/api/internal/tasks', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      });
+    if (usesGateway()) {
+      assertGatewayReady();
+      return gatewayClient.createTask(data);
     }
-
-    // Mode autonome
-    const newTask: Task = {
-      id: 'task-' + Date.now(),
-      user_id: data.user_id,
-      title: data.title,
-      description: data.description || null,
-      status: data.status as any,
-      priority: data.priority as any,
-      due_date: data.due_date || null,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-    memoryTasks.push(newTask);
-    return newTask;
+    return postgresStore.createTask(data);
   },
 
-  // Mettre à jour une tâche
   async updateTask(
     id: string,
     userId: string,
@@ -182,55 +101,75 @@ export const dataService = {
       due_date?: string | null;
     }
   ): Promise<Task | null> {
-    if (config.gatewayUrl) {
-      return callGateway<Task | null>(`/api/internal/tasks/${id}`, {
-        method: 'PUT',
-        body: JSON.stringify({ userId, ...data }),
-      });
+    if (usesGateway()) {
+      assertGatewayReady();
+      return gatewayClient.updateTask(id, userId, data);
     }
-
-    // Mode autonome
-    const task = memoryTasks.find((t) => t.id === id && t.user_id === userId);
-    if (!task) return null;
-
-    if (data.title !== undefined) task.title = data.title;
-    if (data.description !== undefined) task.description = data.description;
-    if (data.status !== undefined) task.status = data.status as any;
-    if (data.priority !== undefined) task.priority = data.priority as any;
-    if (data.due_date !== undefined) task.due_date = data.due_date;
-    task.updated_at = new Date().toISOString();
-
-    return task;
+    return postgresStore.updateTask(id, userId, data);
   },
 
-  // Supprimer une tâche
   async deleteTask(id: string, userId: string): Promise<boolean> {
-    if (config.gatewayUrl) {
-      const res = await callGateway<{ success: boolean }>(`/api/internal/tasks/${id}?userId=${userId}`, {
-        method: 'DELETE',
-      });
-      return !!res?.success;
+    if (usesGateway()) {
+      assertGatewayReady();
+      return gatewayClient.deleteTask(id, userId);
     }
-
-    // Mode autonome
-    const taskIndex = memoryTasks.findIndex((t) => t.id === id && t.user_id === userId);
-    if (taskIndex === -1) return false;
-
-    memoryTasks.splice(taskIndex, 1);
-    return true;
+    return postgresStore.deleteTask(id, userId);
   },
 
-  // Vérifier la santé du service
-  async checkHealth(): Promise<{ status: string; mode: string; details?: any }> {
-    if (config.gatewayUrl) {
-      try {
-        const res = await callGateway<any>('/api/internal/health');
-        return { status: 'healthy', mode: 'gateway_connected', details: res };
-      } catch (err: any) {
-        return { status: 'degraded', mode: 'gateway_disconnected', details: { error: err.message } };
+  async getTaskStats(userId: string): Promise<TaskStats> {
+    if (usesGateway()) {
+      assertGatewayReady();
+      return gatewayClient.getTaskStats(userId);
+    }
+    return postgresStore.getTaskStats(userId);
+  },
+
+  async checkHealth(): Promise<{ status: string; mode: string; details?: unknown }> {
+    if (usesGateway()) {
+      if (!config.localGatewayUrl || !config.localGatewayToken) {
+        return {
+          status: 'degraded',
+          mode: 'gateway_not_configured',
+          details: { error: 'LOCAL_GATEWAY_URL ou LOCAL_GATEWAY_TOKEN manquant' },
+        };
       }
+
+      const probe = await gatewayClient.healthProbe();
+      if (probe.statusCode === 200 && probe.body?.database === 'up') {
+        return { status: 'healthy', mode: 'hybrid_via_gateway', details: { database: 'up' } };
+      }
+      if (probe.statusCode === 401 || probe.statusCode === 403) {
+        return {
+          status: 'degraded',
+          mode: 'gateway_rejected',
+          details: { error: 'Secret de passerelle refusé' },
+        };
+      }
+      if (probe.statusCode >= 500) {
+        return {
+          status: 'degraded',
+          mode: 'postgres_unavailable',
+          details: { database: 'down' },
+        };
+      }
+      return {
+        status: 'degraded',
+        mode: 'gateway_disconnected',
+        details: { error: 'Tunnel ou passerelle injoignable' },
+      };
     }
 
-    return { status: 'healthy', mode: 'autonomous_backend', details: 'Backend opérationnel' };
+    try {
+      await checkDatabase();
+      return { status: 'healthy', mode: 'postgres_direct', details: { database: 'up' } };
+    } catch (error) {
+      return {
+        status: 'degraded',
+        mode: 'postgres_unavailable',
+        details: { error: error instanceof Error ? error.message : 'PostgreSQL indisponible' },
+      };
+    }
   },
 };
+
+export { DataUnavailableError } from '../errors';
