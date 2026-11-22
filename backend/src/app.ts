@@ -10,10 +10,14 @@ export function createApp(): express.Express {
   const app = express();
   app.disable('x-powered-by');
 
-  const allowedOrigins =
-    config.frontendUrl === '*'
-      ? true
-      : [...config.frontendUrl.split(',').map((origin) => origin.trim()).filter(Boolean), 'http://localhost:3000'];
+  const configuredOrigins = config.frontendUrl === '*'
+    ? []
+    : config.frontendUrl.split(',').map((origin) => origin.trim()).filter(Boolean);
+  const allowedOrigins = [
+    ...configuredOrigins,
+    'https://gestion-de-taches-fyswuxcs6-clementadjivon52-commits-projects.vercel.app',
+    'http://localhost:3000',
+  ];
 
   app.use(
     cors({
