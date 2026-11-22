@@ -41,6 +41,39 @@ test('la racine annonce le mode sans secret', async () => {
   assert.equal(JSON.stringify(body).includes('token'), false);
 });
 
+test('preflight CORS autorise le frontend Vercel pour inscription', async () => {
+  const response = await fetch(`${baseUrl}/api/auth/register`, {
+    method: 'OPTIONS',
+    headers: {
+      Origin: 'https://gestion-de-taches-fyswuxcs6-clementadjivon52-commits-projects.vercel.app',
+      'Access-Control-Request-Method': 'POST',
+      'Access-Control-Request-Headers': 'content-type',
+    },
+  });
+
+  assert.equal(response.status, 204);
+  assert.equal(
+    response.headers.get('access-control-allow-origin'),
+    'https://gestion-de-taches-fyswuxcs6-clementadjivon52-commits-projects.vercel.app'
+  );
+  assert.match(response.headers.get('access-control-allow-methods') || '', /POST/);
+  assert.match(response.headers.get('access-control-allow-headers') || '', /Content-Type/i);
+});
+
+test('preflight CORS ne reflète pas une origine non autorisée', async () => {
+  const response = await fetch(`${baseUrl}/api/auth/register`, {
+    method: 'OPTIONS',
+    headers: {
+      Origin: 'https://untrusted.example',
+      'Access-Control-Request-Method': 'POST',
+      'Access-Control-Request-Headers': 'content-type',
+    },
+  });
+
+  assert.equal(response.status, 204);
+  assert.equal(response.headers.get('access-control-allow-origin'), null);
+});
+
 test('inscription incomplète : 400', async () => {
   const { status, body } = await json('/api/auth/register', {
     method: 'POST',
