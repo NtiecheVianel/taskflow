@@ -45,7 +45,7 @@ test('preflight CORS autorise le frontend Vercel pour inscription', async () => 
   const response = await fetch(`${baseUrl}/api/auth/register`, {
     method: 'OPTIONS',
     headers: {
-      Origin: 'https://gestion-de-taches-fyswuxcs6-clementadjivon52-commits-projects.vercel.app',
+      Origin: 'https://gestion-de-taches-jet.vercel.app',
       'Access-Control-Request-Method': 'POST',
       'Access-Control-Request-Headers': 'content-type',
     },
@@ -54,7 +54,7 @@ test('preflight CORS autorise le frontend Vercel pour inscription', async () => 
   assert.equal(response.status, 204);
   assert.equal(
     response.headers.get('access-control-allow-origin'),
-    'https://gestion-de-taches-fyswuxcs6-clementadjivon52-commits-projects.vercel.app'
+    'https://gestion-de-taches-jet.vercel.app'
   );
   assert.match(response.headers.get('access-control-allow-methods') || '', /POST/);
   assert.match(response.headers.get('access-control-allow-headers') || '', /Content-Type/i);
